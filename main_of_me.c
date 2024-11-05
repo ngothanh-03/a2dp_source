@@ -235,7 +235,183 @@ static void bt_app_a2d_cb(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param)
     bt_app_work_dispatch(bt_app_av_sm_hdlr, event, param, sizeof(esp_a2d_cb_param_t), NULL);
 }
 
-// Hàm xử lý logic trong hàm main
+
+static void bt_app_av_sm_hdlr(uint16_t event, void *param)
+{
+    ESP_LOGI(BT_AV_TAG, "%s state: %d, event: 0x%x", __func__, s_a2d_state, event);
+
+    /* select handler according to different states */
+    switch (s_a2d_state) {
+    case APP_AV_STATE_DISCOVERING:
+    case APP_AV_STATE_DISCOVERED:
+        break;
+    case APP_AV_STATE_UNCONNECTED:
+        bt_app_av_state_unconnected_hdlr(event, param);
+        break;
+    case APP_AV_STATE_CONNECTING:
+        bt_app_av_state_connecting_hdlr(event, param);
+        break;
+    case APP_AV_STATE_CONNECTED:
+        bt_app_av_state_connected_hdlr(event, param);
+        break;
+    case APP_AV_STATE_DISCONNECTING:
+        bt_app_av_state_disconnecting_hdlr(event, param);
+        break;
+    default:
+        ESP_LOGE(BT_AV_TAG, "%s invalid state: %d", __func__, s_a2d_state);
+        break;
+    }
+}
+
+
+
+static void bt_app_av_state_unconnected_hdlr(uint16_t event, void *param)
+{
+    esp_a2d_cb_param_t *a2d = NULL;
+    /* handle the events of interest in unconnected state */
+    switch (event) {
+    case ESP_A2D_CONNECTION_STATE_EVT:
+    case ESP_A2D_AUDIO_STATE_EVT:
+    case ESP_A2D_AUDIO_CFG_EVT:
+    case ESP_A2D_MEDIA_CTRL_ACK_EVT:
+        break;
+    case BT_APP_HEART_BEAT_EVT: {
+        uint8_t *bda = s_peer_bda;
+        ESP_LOGI(BT_AV_TAG, "a2dp connecting to peer: %02x:%02x:%02x:%02x:%02x:%02x",
+                 bda[0], bda[1], bda[2], bda[3], bda[4], bda[5]);
+        esp_a2d_source_connect(s_peer_bda);
+        s_a2d_state = APP_AV_STATE_CONNECTING;
+        s_connecting_intv = 0;
+        break;
+    }
+    case ESP_A2D_REPORT_SNK_DELAY_VALUE_EVT: {
+        a2d = (esp_a2d_cb_param_t *)(param);
+        ESP_LOGI(BT_AV_TAG, "%s, delay value: %u * 1/10 ms", __func__, a2d->a2d_report_delay_value_stat.delay_value);
+        break;
+    }
+    default: {
+        ESP_LOGE(BT_AV_TAG, "%s unhandled event: %d", __func__, event);
+        break;
+    }
+    }
+}
+
+static void bt_app_av_state_connecting_hdlr(uint16_t event, void *param)
+{
+    esp_a2d_cb_param_t *a2d = NULL;
+
+    /* handle the events of interest in connecting state */
+    switch (event) {
+    case ESP_A2D_CONNECTION_STATE_EVT: {
+        a2d = (esp_a2d_cb_param_t *)(param);
+        if (a2d->conn_stat.state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
+            ESP_LOGI(BT_AV_TAG, "a2dp connected");
+            s_a2d_state =  APP_AV_STATE_CONNECTED;
+            s_media_state = APP_AV_MEDIA_STATE_IDLE;
+        } else if (a2d->conn_stat.state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
+            s_a2d_state =  APP_AV_STATE_UNCONNECTED;
+        }
+        break;
+    }
+    case ESP_A2D_AUDIO_STATE_EVT:
+    case ESP_A2D_AUDIO_CFG_EVT:
+    case ESP_A2D_MEDIA_CTRL_ACK_EVT:
+        break;
+    case BT_APP_HEART_BEAT_EVT:
+        /**
+         * Switch state to APP_AV_STATE_UNCONNECTED
+         * when connecting lasts more than 2 heart beat intervals.
+         */
+        if (++s_connecting_intv >= 2) {
+            s_a2d_state = APP_AV_STATE_UNCONNECTED;
+            s_connecting_intv = 0;
+        }
+        break;
+    case ESP_A2D_REPORT_SNK_DELAY_VALUE_EVT: {
+        a2d = (esp_a2d_cb_param_t *)(param);
+        ESP_LOGI(BT_AV_TAG, "%s, delay value: %u * 1/10 ms", __func__, a2d->a2d_report_delay_value_stat.delay_value);
+        break;
+    }
+    default:
+        ESP_LOGE(BT_AV_TAG, "%s unhandled event: %d", __func__, event);
+        break;
+    }
+}
+
+static void bt_app_av_state_connected_hdlr(uint16_t event, void *param)
+{
+    esp_a2d_cb_param_t *a2d = NULL;
+
+    /* handle the events of interest in connected state */
+    switch (event) {
+    case ESP_A2D_CONNECTION_STATE_EVT: {
+        a2d = (esp_a2d_cb_param_t *)(param);
+        if (a2d->conn_stat.state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
+            ESP_LOGI(BT_AV_TAG, "a2dp disconnected");
+            s_a2d_state = APP_AV_STATE_UNCONNECTED;
+        }
+        break;
+    }
+    case ESP_A2D_AUDIO_STATE_EVT: {
+        a2d = (esp_a2d_cb_param_t *)(param);
+        if (ESP_A2D_AUDIO_STATE_STARTED == a2d->audio_stat.state) {
+            s_pkt_cnt = 0;
+        }
+        break;
+    }
+    case ESP_A2D_AUDIO_CFG_EVT:
+        // not supposed to occur for A2DP source
+        break;
+    case ESP_A2D_MEDIA_CTRL_ACK_EVT:
+    case BT_APP_HEART_BEAT_EVT: {
+        // Xử lý quá trình điều khiển media: dừng, phát audio
+        //bt_app_av_media_proc(event, param);
+        break;
+    }
+    case ESP_A2D_REPORT_SNK_DELAY_VALUE_EVT: {
+        a2d = (esp_a2d_cb_param_t *)(param);
+        ESP_LOGI(BT_AV_TAG, "%s, delay value: %u * 1/10 ms", __func__, a2d->a2d_report_delay_value_stat.delay_value);
+        break;
+    }
+    default: {
+        ESP_LOGE(BT_AV_TAG, "%s unhandled event: %d", __func__, event);
+        break;
+    }
+    }
+}
+
+static void bt_app_av_state_disconnecting_hdlr(uint16_t event, void *param)
+{
+    esp_a2d_cb_param_t *a2d = NULL;
+
+    /* handle the events of interest in disconnecing state */
+    switch (event) {
+    case ESP_A2D_CONNECTION_STATE_EVT: {
+        a2d = (esp_a2d_cb_param_t *)(param);
+        if (a2d->conn_stat.state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
+            ESP_LOGI(BT_AV_TAG, "a2dp disconnected");
+            s_a2d_state =  APP_AV_STATE_UNCONNECTED;
+        }
+        break;
+    }
+    case ESP_A2D_AUDIO_STATE_EVT:
+    case ESP_A2D_AUDIO_CFG_EVT:
+    case ESP_A2D_MEDIA_CTRL_ACK_EVT:
+    case BT_APP_HEART_BEAT_EVT:
+        break;
+    case ESP_A2D_REPORT_SNK_DELAY_VALUE_EVT: {
+        a2d = (esp_a2d_cb_param_t *)(param);
+        ESP_LOGI(BT_AV_TAG, "%s, delay value: 0x%u * 1/10 ms", __func__, a2d->a2d_report_delay_value_stat.delay_value);
+        break;
+    }
+    default: {
+        ESP_LOGE(BT_AV_TAG, "%s unhandled event: %d", __func__, event);
+        break;
+    }
+    }
+}
+
+// Xử lý logic trong hàm main
 static void bt_av_hdl_stack_evt(uint16_t event, void *p_param)
 {
     ESP_LOGD(BT_AV_TAG, "%s event: %d", __func__, event);
